@@ -1,0 +1,206 @@
+import net from 'node:net';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+// NONACTIVE TEMPLATE: resolve the compatible package and verify its producer before enabling.
+import { isNotificationSourceEvent, NOTIFICATION_SOURCE_EVENT } from "./compatible-notification-events.ts";
+
+const SOURCE = 'herdr:pi:subagents';
+export const LEASE_MS = 30_000;
+export const RENEW_MS = 10_000;
+const ROLE_ORDER = ['A', 'R', 'W', 'V', 'RD'] as const;
+type RoleCode = typeof ROLE_ORDER[number];
+const AGENT_ROLES = new Map<string, RoleCode>([
+  ['explore', 'A'], ['gentle-ai-explore', 'A'],
+  ['research', 'R'], ['gentle-ai-research', 'R'], ['sdd-research', 'R'],
+  ['worker', 'W'], ['gentle-ai-worker', 'W'], ['verify', 'V'], ['gentle-ai-verify', 'V'],
+  ['review-risk', 'RD'], ['review-reliability', 'RD'], ['review-resilience', 'RD'],
+  ['review-readability', 'RD'], ['review-refuter', 'RD'], ['review-validator', 'RD'],
+]);
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+// Public launch/continuation result details, not prompt text or rendered labels.
+function taskRole(details: unknown): { taskId: string; code: RoleCode | null } | undefined {
+  if (!record(details) || !record(details.gentleAgents)) return;
+  const task = details.gentleAgents;
+  if (task.mode !== 'background' || typeof task.taskId !== 'string' || !task.taskId || task.taskId.length > 512
+      || typeof task.agent !== 'string' || !task.agent || task.agent.length > 128) return;
+  return { taskId: task.taskId, code: AGENT_ROLES.get(task.agent) ?? null };
+}
+type Environment = Pick<NodeJS.ProcessEnv, 'HERDR_ENV' | 'HERDR_SOCKET_PATH' | 'HERDR_PANE_ID' | 'PI_SUBAGENT_CHILD' | 'GENTLE_PI_AGENTS_CHILD'>;
+export type MetadataRequest = {
+  id: string;
+  method: 'pane.report_metadata';
+  params: {
+    pane_id: string; source: string; agent: 'pi'; seq: number; ttl_ms: number;
+    tokens: { subagents_running: string; subagents_session_key: string; subagents_roles: string };
+  };
+};
+export type Runtime = {
+  env: Environment;
+  now: () => number;
+  send: (request: MetadataRequest) => Promise<boolean>;
+  schedule: (callback: () => void) => () => void;
+};
+type Owner = { id: string; path: string; attachedAt: number };
+type Cursor = { producer: string; sequence: number; occurredAt: number };
+type Desired = { path: string; count: number; roles: string };
+
+// Display-only transport. Never report_agent, focus, prompt, or read a session file.
+export function socketSender(endpoint: string): Runtime['send'] {
+  return (request) => new Promise<boolean>((resolve) => {
+    let settled = false;
+    let buffer = '';
+    const socket = net.createConnection(endpoint);
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.destroy();
+      resolve(ok);
+    };
+    const timeout = setTimeout(() => finish(false), 1000);
+    timeout.unref();
+    socket.on('error', () => finish(false));
+    socket.on('end', () => finish(false));
+    socket.on('connect', () => socket.write(JSON.stringify(request) + '\n'));
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString();
+      if (buffer.length > 65_536) return finish(false);
+      const end = buffer.indexOf('\n');
+      if (end < 0) return;
+      try {
+        const reply: unknown = JSON.parse(buffer.slice(0, end));
+        finish(typeof reply === 'object' && reply !== null && !Array.isArray(reply)
+          && 'id' in reply && reply.id === request.id && 'result' in reply && !('error' in reply));
+      } catch { finish(false); }
+    });
+  });
+}
+
+export function installSubagentActivity(pi: ExtensionAPI, runtime: Runtime): void {
+  const { env } = runtime;
+  const pane = env.HERDR_PANE_ID;
+  if (env.HERDR_ENV !== '1' || !pane || !env.HERDR_SOCKET_PATH
+      || env.PI_SUBAGENT_CHILD === '1' || env.GENTLE_PI_AGENTS_CHILD === '1') return;
+
+  let owner: Owner | undefined;
+  let stopped = false;
+  const running = new Set<string>();
+  const roles = new Map<string, RoleCode | null>();
+  function roleCodes(): string {
+    const active = new Set<RoleCode>();
+    for (const id of running) {
+      const code = roles.get(id);
+      if (!code) return ''; // Unknown active roles retain the ordinary Pi prefix.
+      active.add(code);
+    }
+    return ROLE_ORDER.filter(code => active.has(code)).join('+');
+  }
+  const cursors = new Map<string, Cursor>();
+  let cancelRenewal: (() => void) | undefined;
+  let pending: Desired | undefined;
+  let inFlight: Promise<void> | undefined;
+  let sequence = Date.now() * 1000;
+
+  function drain(): Promise<void> {
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      while (pending) {
+        const next = pending;
+        pending = undefined;
+        const seq = ++sequence;
+        const request: MetadataRequest = {
+          id: `${SOURCE}:${seq}`, method: 'pane.report_metadata',
+          params: { pane_id: pane, source: SOURCE, agent: 'pi', seq, ttl_ms: LEASE_MS,
+            // Native Herdr silently shortens token values to 80 characters.
+            // A 64-character digest keeps exact ownership even for long SDK paths.
+            tokens: { subagents_running: String(next.count),
+              subagents_session_key: createHash('sha256').update(next.path, 'utf8').digest('hex'),
+              subagents_roles: next.roles } },
+        };
+        // A failed update cannot keep blue indefinitely: native metadata expires.
+        try { await runtime.send(request); } catch { /* Next renewal may recover; no unbounded retry. */ }
+      }
+    })().finally(async () => {
+      inFlight = undefined;
+      // A publish can land between the loop's final check and this microtask.
+      if (pending) await drain();
+    });
+    return inFlight;
+  }
+  function publish(): Promise<void> {
+    if (!owner) return Promise.resolve();
+    pending = { path: owner.path, count: running.size, roles: roleCodes() };
+    return drain();
+  }
+  function syncRenewal(): void {
+    if (running.size > 0 && !cancelRenewal) {
+      cancelRenewal = runtime.schedule(() => { if (!stopped && owner) void publish(); });
+    } else if (running.size === 0 && cancelRenewal) {
+      cancelRenewal(); cancelRenewal = undefined;
+    }
+  }
+  function attach(ctx: ExtensionContext, reset: boolean): void {
+    if (stopped || ctx.mode !== 'tui') return;
+    const id = ctx.sessionManager.getSessionId();
+    const file = ctx.sessionManager.getSessionFile();
+    if (!id || !file || !(path.posix.isAbsolute(file) || path.win32.isAbsolute(file))) return;
+    if (reset || owner?.id !== id) {
+      running.clear(); roles.clear(); cursors.clear();
+      owner = { id, path: file, attachedAt: runtime.now() };
+      syncRenewal(); void publish();
+    } else if (owner.path !== file) {
+      owner = { ...owner, path: file }; void publish();
+    }
+  }
+  const unsubscribe = pi.events.on(NOTIFICATION_SOURCE_EVENT, (data: unknown) => {
+    if (stopped || !owner || !isNotificationSourceEvent(data) || data.source !== 'subagent'
+        || data.parentSessionId !== owner.id || data.occurredAt < owner.attachedAt
+        || data.occurredAt > runtime.now()) return;
+    const previous = cursors.get(data.taskId);
+    if (previous && (data.occurredAt < previous.occurredAt
+        || (data.producerId === previous.producer && data.sequence <= previous.sequence))) return;
+    cursors.set(data.taskId, { producer: data.producerId, sequence: data.sequence, occurredAt: data.occurredAt });
+    const before = running.size;
+    if (data.status === 'running') running.add(data.taskId);
+    else running.delete(data.taskId);
+    if (before !== running.size) { syncRenewal(); void publish(); }
+  });
+  pi.on('tool_execution_end', (event, ctx) => {
+    if (stopped || !owner || ctx.mode !== 'tui' || ctx.sessionManager.getSessionId() !== owner.id
+        || event.isError || (event.toolName !== 'subagent_run' && event.toolName !== 'subagent_continue')) return;
+    const binding = taskRole(record(event.result) ? event.result.details : undefined);
+    if (!binding) return;
+    const before = roleCodes();
+    roles.set(binding.taskId, binding.code);
+    // A result only identifies a task; the ordered status bus alone decides whether it runs.
+    // Background results may arrive before OR after RUNNING, including nested tool calls.
+    if (before !== roleCodes()) void publish();
+  });
+  pi.on('session_start', (_event, ctx) => attach(ctx, true));
+  pi.on('agent_start', (_event, ctx) => attach(ctx, false));
+  pi.on('session_shutdown', async () => {
+    if (stopped) return;
+    stopped = true;
+    unsubscribe();
+    running.clear(); roles.clear(); cursors.clear(); syncRenewal();
+    await publish();
+    owner = undefined;
+  });
+}
+
+export default function (pi: ExtensionAPI): void {
+  // Factories register only. Connections and the lease timer start after a TUI session attaches.
+  const socket = process.env.HERDR_SOCKET_PATH ?? '';
+  const endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\${socket}` : socket;
+  installSubagentActivity(pi, {
+    env: process.env, now: () => performance.now(), send: socketSender(endpoint),
+    schedule: (callback) => {
+      const timer = setInterval(callback, RENEW_MS);
+      timer.unref();
+      return () => clearInterval(timer);
+    },
+  });
+}

@@ -1,0 +1,18 @@
+[
+  {
+    "file": "herdr/config.toml",
+    "sha256": "1be0ae2fba860dbe0cb1770daf27616dfcf5c8bd7de01c7c21cefb0428a8b46e"
+  },
+  {
+    "file": "herdr/plugins/hhdebb.herdr-radar/config.toml",
+    "sha256": "d62764f2caa743406890338163f453f166a3aeb9bf2b241e22a202fc91b2f389"
+  },
+  {
+    "file": "pi/themes/blue-theme-border-trial.json",
+    "sha256": "76c419fe96381fd03a22e06c10499258014842031ef91699bb43f820d4314777"
+  },
+  {
+    "file": "gentle-shell/settings.template.json",
+    "sha256": "814fa4616c6c37de8ffce5498d3c09afd11a648143e637f5a2d2fe68be2f1ba2"
+  }
+]

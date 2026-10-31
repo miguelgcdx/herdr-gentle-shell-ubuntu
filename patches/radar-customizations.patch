@@ -1,0 +1,1015 @@
+diff --git a/README.md b/README.md
+index 0311549..8992132 100644
+--- a/README.md
++++ b/README.md
+@@ -16,6 +16,11 @@
+ 
+ ---
+ 
++> **Locally customized installation:** future agents should read [AGENTS.md](AGENTS.md)
++> and [LOCAL-CUSTOMIZATIONS.md](LOCAL-CUSTOMIZATIONS.md) before changing this plugin.
++> Active work records live here; `work-history/herdr/` is an archived native checkout,
++> not an active build or installation target.
++
+ ## What it is
+ 
+ A [Herdr](https://herdr.dev) plugin that turns the sidebar's Agents list into something you
+@@ -184,6 +189,50 @@ Kilo pane happened to be busy.
+ The Spaces column takes the same vendor colours, so a workspace running Claude and one running
+ Gemini are told apart there too.
+ 
++### Local Pi delegated activity
++
++The local Pi integration can publish display-only `subagents_running` and
++`subagents_session_key` metadata (source `herdr:pi:subagents`). The key is the
++lowercase 64-character SHA256 hex digest of the full UTF8 SDK session file path.
++Native Herdr v0.9.3 limits each metadata value to 80 characters, so a full path
++in a token can be truncated; the digest fits without losing ownership identity.
++Radar accepts a positive decimal safe-integer count only for Pi with
++`agent_session.kind = "path"`, a nonempty native session value string, and an
++exact key match against SHA256 of that complete value. Missing, expired,
++malformed or foreign-session keys leave ordinary rendering unchanged. Legacy
++`subagents_session_path` tokens and truncated/shared path prefixes are not accepted.
++
++Optional `subagents_roles` metadata identifies the active children's roles. Only
++an owned positive count allows Radar to read this token: known codes are `A`
++(explore), `R` (research), `W` (worker), `V` (verify), and `RD` (background review).
++Distinct codes combine in that order (`A+W`); duplicates collapse. Tokens longer
++than 11 characters, malformed strings or any unknown code are rejected as a whole.
++Pi sidebar titles omit the exact leading textual `π - ` marker in every state,
++including the first entry that owns the separate original vendor logo. The working
++spinner and other activity indicators remain; other harnesses and embedded `π -`
++text are unchanged. The canonical terminal title is never renamed.
++In the blue delegated title, that leading marker becomes the validated codes plus
++one space: `A Inspect project structure`. Missing, empty or invalid roles show just
++the title words, so older producers still work without a misleading role prefix.
++A role change redraws even with the same count and title; completion clears blue
++and restores the plain title. No role is inferred from prompt text or agent labels.
++
++While children run, a confirmed idle-tier or held-finished parent's title uses
++the separate `$title_delegating` cell. Unknown parents never use it. The local sidebar config must provide that cell with
++blue foreground `#5F87FE`; Radar does not install it. Working and blocked titles
++keep precedence. Idle tiers and held finished badges keep their canonical state,
++and the finished green title returns when children stop. Logos, group layout,
++Spaces state and activity sorting do not change. The existing two-second daemon
++heartbeat reconciles metadata through the same scheduler; no extra polling loop
++or self-write `pane.updated` subscription is added. Pickup and clearing are not
++instant: allow up to five seconds under normal responsive operation. The producer
++design uses a 30-second metadata lease renewed every 10 seconds while children
++run. If the producer disappears without clearing, blue can remain until lease
++expiry plus reconciliation. No parent status is faked.
++
++This installed customization is update-sensitive: revalidate after plugin updates.
++Activation is separate from these edits; no live restart is performed here.
++
+ ## Which agents it knows
+ 
+ Twenty-seven vendors have a mark of their own:
+@@ -237,6 +286,7 @@ the config file and restarts the daemon.
+ | `agents_panel` | `plugin` | this plugin's panel, or `herdr` for Herdr's own |
+ | `order` | `active` | `active` grouped by activity / `recent` flat / `off` Herdr's order |
+ | `variant` | `auto` | logos from the icon font (`font`), plain Unicode (`text`), or `none`; `auto` recognises the font the plugin installed |
++| `logo_scope` | `all` | in the grouped view, `first_per_workspace` shows each harness logo only on its first displayed session per project; `all` and flat views retain per-session logos |
+ | `done_hold` | `until_seen` | keep the tick until the pane is focused, or a number of seconds |
+ | `blocked_hold` | `true` | keep the question mark until the agent works again |
+ | `idle_grace_seconds` | `2.5` | idle must persist this long to count as a finished turn |
+@@ -253,6 +303,12 @@ the config file and restarts the daemon.
+ | `colors.active_row_bg_light` | `#b9cdf2` | selected-row fill for a light theme; empty keeps the theme's own |
+ | `colors.active_row_bg_dark` | `#414868` | selected-row fill for a dark theme |
+ 
++Set `logo_scope = "first_per_workspace"` to avoid repeated logos in a project.
++Ten Pi sessions in one project then share one Pi logo on the first displayed entry;
++a second project gets its own Pi logo. Mixed harnesses each keep their first logo.
++The logo follows the current activity order, retaining its original glyph/color
++and leaving the other sessions' titles and lifecycle states intact.
++
+ `row_label` picks what names an agent row. `title` is the session's own title,
+ `tab` is the name of the tab it runs in, and `both` puts the tab name in front of
+ the title — what `show_tab = true` did, which still reads as `both`. Pick `tab`
+diff --git a/bin/settings.js b/bin/settings.js
+index e58e613..792fad8 100644
+--- a/bin/settings.js
++++ b/bin/settings.js
+@@ -85,6 +85,13 @@ const FIELDS = [
+     fallback: 'auto',
+     help: 'Vendor logos and state marks from the icon font, plain Unicode, or none. auto asks fontconfig (Linux only).',
+   },
++  {
++    key: 'logo_scope',
++    kind: 'enum',
++    options: ['all', 'first_per_workspace'],
++    fallback: 'all',
++    help: 'Grouped view: show each harness logo on every session, or only its first displayed session in each workspace. Flat views are unchanged.',
++  },
+   {
+     key: 'done_hold',
+     kind: 'enum',
+diff --git a/lib/config.js b/lib/config.js
+index 4e50219..2f1ac6d 100644
+--- a/lib/config.js
++++ b/lib/config.js
+@@ -167,6 +167,10 @@ module.exports = {
+   // auto | font | text | none
+   variant: typeof raw.variant === 'string' ? raw.variant : 'auto',
+ 
++  // Grouped view: every session, or the first displayed pane per harness
++  // within each workspace. Other views retain their per-session logos.
++  logoScope: raw.logo_scope === 'first_per_workspace' ? 'first_per_workspace' : 'all',
++
+   // How long the green check survives after a turn ends. Herdr collapses `done`
+   // into `idle` almost immediately, so the badge is this plugin's own
+   // invention; six seconds is easy to miss when several agents finish while you
+diff --git a/lib/frame.js b/lib/frame.js
+index b8e1f5b..9bbae71 100644
+--- a/lib/frame.js
++++ b/lib/frame.js
+@@ -146,6 +146,20 @@ class Frame {
+     // with neither, the config's grouped/priority choice decides.
+     const grouped = viewMode === 'grouped' || (viewMode === null && herdr.panelGrouped(now));
+     const displayEntries = this.displayOrder(entries, viewMode, keys);
++    // In grouped views, keep each harness's logo on its first displayed pane
++    // in each workspace. Recompute after sorting so ownership follows activity.
++    const logoHeads = grouped && config.logoScope === 'first_per_workspace' ? new Set() : null;
++    if (logoHeads) {
++      const seen = new Map();
++      for (const entry of displayEntries) {
++        const workspace = entry.workspace || entry.pane;
++        if (!seen.has(workspace)) seen.set(workspace, new Set());
++        const harnesses = seen.get(workspace);
++        if (harnesses.has(entry.name)) continue;
++        harnesses.add(entry.name);
++        logoHeads.add(entry.pane);
++      }
++    }
+     // Boundaries are needed now — the per-pane loop indents by them — but the
+     // group furniture is WRITTEN after that loop, because a header fades with
+     // its workspace and whether a workspace is entirely stale is only known
+@@ -206,7 +220,14 @@ class Frame {
+       // The header text this row will sit under, for the prefix trim. Empty
+       // in the flat view: nothing is repeated there.
+       const header = grouped && config.trimGroupPrefix ? (workspaces.get(entry.workspace) ?? '') : '';
+-      this.paneJobs(entry, display, { tabs, keys, indent, corner, spinStep, header }, now, deadlines, jobs);
++      this.paneJobs(
++        entry,
++        display,
++        { tabs, keys, indent, corner, spinStep, header, showLogo: !logoHeads || logoHeads.has(entry.pane) },
++        now,
++        deadlines,
++        jobs,
++      );
+     }
+ 
+     this.clearGone(live, now, jobs);
+@@ -472,7 +493,7 @@ class Frame {
+ 
+   // The three token families a pane carries — vendor logo, state line, sort
+   // keys — each written only when it changed since the last successful write.
+-  paneJobs(entry, display, { tabs, keys, indent, corner = '', spinStep, header = '' }, now, deadlines, jobs) {
++  paneJobs(entry, display, { tabs, keys, indent, corner = '', spinStep, header = '', showLogo = true }, now, deadlines, jobs) {
+     const pane = entry.pane;
+     const src = this.src;
+ 
+@@ -491,15 +512,20 @@ class Frame {
+       tabs.get(entry.tab) ?? '',
+       state.trimGroupPrefix(entry.title, header),
+     );
+-    const line = state.composeLine(entry, display, tabLabel, indent, spinStep, corner);
++    const line = state.composeLine(entry, display, tabLabel, indent, spinStep, corner, showLogo);
+     // A state with no line still has to clear the previous one: merely
+     // skipping the write leaves the old token up — or, on a pane that had
+     // none, no state row at all, which renders its bare title at the margin
+     // looking like a group header.
+-    const key = line ? `${display}:${line.mark}:${line.split}:${line.logo}:${line.titlePrefix}:${title}` : '';
++    const delegating = entry.subagentsRunning > 0 && (
++      ['idle', 'idle_fresh', 'idle_stale'].includes(display) ||
++      (display === 'done' && this.doneUntil.has(pane))
++    );
++    const roles = delegating ? entry.subagentsRoles : '';
++    const key = line ? `${entry.name}:${display}:${delegating}:${roles}:${line.mark}:${line.split}:${line.logo}:${line.titlePrefix}:${title}` : '';
+     if (this.lastLine.get(pane) !== key && this.writable(`line:${pane}`, now)) {
+       // Send the difference, not the whole set: see state.stateTokens.
+-      const tokens = line ? state.stateTokens(display, line, title) : null;
++      const tokens = line ? state.stateTokens(display, line, title, delegating, roles, entry.name) : null;
+       // The first write to a pane in this daemon's life sends the whole set,
+       // nulls included: the pane may still carry names an earlier daemon left
+       // on it — a title under a state it is no longer in, say — and a delta
+diff --git a/lib/state.js b/lib/state.js
+index 757b8fa..39eaab8 100644
+--- a/lib/state.js
++++ b/lib/state.js
+@@ -17,6 +17,7 @@
+ const path = require('node:path');
+ const fs = require('node:fs');
+ const os = require('node:os');
++const { createHash } = require('node:crypto');
+ 
+ const herdr = require('./herdr');
+ const config = require('./config');
+@@ -263,6 +264,39 @@ function declaredVendor(agent) {
+   return declared && declared in PUA ? declared : '';
+ }
+ 
++// Display-only Pi activity belongs to this exact SDK session file. Never
++// coerce arbitrary metadata into a count or let another harness inherit it.
++function subagentsRunning(agent, tokens) {
++  const count = tokens.subagents_running;
++  const owner = tokens.subagents_session_key;
++  const session = agent.agent_session?.value;
++  if (
++    agent.agent !== 'pi' ||
++    agent.agent_session?.kind !== 'path' ||
++    typeof session !== 'string' || !session ||
++    typeof owner !== 'string' || owner.length !== 64 || !/^[0-9a-f]+$/.test(owner) ||
++    typeof count !== 'string' || !/^[0-9]+$/.test(count)
++  ) return 0;
++  // Native metadata values stop at 80 characters; hash the complete native
++  // session value rather than accepting a truncated path or shared prefix.
++  if (owner !== createHash('sha256').update(session, 'utf8').digest('hex')) return 0;
++  const value = Number(count);
++  return Number.isSafeInteger(value) && value > 0 ? value : 0;
++}
++
++const SUBAGENT_ROLE_CODES = ['A', 'R', 'W', 'V', 'RD'];
++
++// Read roles only after exact session ownership and count validation. Reject
++// the whole token on any unknown code rather than mislabel a mixed group.
++function subagentRoles(tokens, running) {
++  if (!running) return '';
++  const roles = tokens.subagents_roles;
++  if (typeof roles !== 'string' || !roles || roles.length > 11) return '';
++  const codes = roles.split('+');
++  if (!codes.every(code => SUBAGENT_ROLE_CODES.includes(code))) return '';
++  return SUBAGENT_ROLE_CODES.filter(code => codes.includes(code)).join('+');
++}
++
+ // One entry per live agent pane, with everything a frame needs. Null when the
+ // list could not be fetched at all — which is not the same as no agents.
+ async function snapshot() {
+@@ -273,6 +307,7 @@ async function snapshot() {
+     const status = a.agent_status;
+     if (typeof pane !== 'string' || typeof status !== 'string') return [];
+     const tokens = a.tokens && typeof a.tokens === 'object' ? a.tokens : {};
++    const running = subagentsRunning(a, tokens);
+     return [
+       {
+         pane,
+@@ -290,6 +325,8 @@ async function snapshot() {
+         // the row keeps the mark it already had.
+         name: hook.apply('agent', declaredVendor(a) || (a.agent ?? ''), pane),
+         session: a.agent_session?.value ?? '',
++        subagentsRunning: running,
++        subagentsRoles: subagentRoles(tokens, running),
+         // The hook runs on the resolved title, so a user hook still has the
+         // last word on what the row shows.
+         //
+@@ -484,7 +521,7 @@ function rowText(rowLabel, tabName, title) {
+ // token is one colour — the cost is the ` · ` Herdr puts between any two
+ // visible cells in a row, which is the same trade the Spaces list already
+ // makes to keep each vendor's logo in its own brand colour.
+-function composeLine(entry, display, tabLabel, indent, step = 0, corner = '') {
++function composeLine(entry, display, tabLabel, indent, step = 0, corner = '', showLogo = true) {
+   const glyph = stateGlyph(baseState(display));
+   if (!glyph) return null;
+ 
+@@ -505,7 +542,7 @@ function composeLine(entry, display, tabLabel, indent, step = 0, corner = '') {
+   // The indent belongs to whichever cell comes first, because Herdr only
+   // hangs its own indent on an entry's continuation rows — and with one row
+   // per entry, a member pane's row IS the first row.
+-  const logo = logoFor(entry.name);
++  const logo = showLogo ? logoFor(entry.name) : null;
+ 
+   // Motion rides in front of the TITLE, not on the mark. A logo in a terminal
+   // cell can only move a few pixels, and a few pixels of moving leg or eye is
+@@ -609,8 +646,17 @@ function reportPane(source, pane, tokens) {
+ // answers in its own time — at four working panes that was fifty writes a
+ // second, which the server met with rising latency until the animation
+ // stuttered.
+-function stateTokens(display, line, title) {
++function stateTokens(display, line, title, delegating = false, roles = '', agent = '') {
+   const tokens = {};
++  // Display-only: the separate Pi logo already identifies the harness. Strip
++  // just its exact leading textual marker, even on the first logo-owning row.
++  const displayTitle = agent === 'pi' ? title.replace(/^π -(?: |$)/, '') : title;
++  // Title styling is separate from canonical state, holds, logos and sorting.
++  const delegated = delegating && ['idle', 'idle_fresh', 'idle_stale', 'done'].includes(display);
++  // Only the delegated cell gets role text. Canonical titles, other harnesses
++  // and the independently animated titlePrefix remain untouched.
++  const delegatedTitle = roles ? title.replace(/^π -(?: |$)/, `${roles} `) : displayTitle;
++  tokens.title_delegating = delegated && delegatedTitle ? line.titlePrefix + delegatedTitle : null;
+   // One logo, under whichever name carries the style this frame needs. The
+   // other three are cleared: which name holds the glyph is the whole signal.
+   for (const name of LOGO_TOKENS) tokens[name] = null;
+@@ -625,7 +671,7 @@ function stateTokens(display, line, title) {
+     // so a pane that has one from a previous version loses it.
+     tokens[`name_${state}`] = null;
+     tokens[`state_${state}`] = current ? line.mark : null;
+-    tokens[`title_${state}`] = current && title ? line.titlePrefix + title : null;
++    tokens[`title_${state}`] = current && !delegated && displayTitle ? line.titlePrefix + displayTitle : null;
+   }
+   return tokens;
+ }
+@@ -645,7 +691,7 @@ function writeTokens(source, pane, tokens) {
+ }
+ 
+ function clearState(source, pane) {
+-  const tokens = { sort_key: null, ws_key: null, tab_key: null, [SPLIT_TOKEN]: null };
++  const tokens = { sort_key: null, ws_key: null, tab_key: null, [SPLIT_TOKEN]: null, title_delegating: null };
+   for (const name of LOGO_TOKENS) tokens[name] = null;
+   for (const state of STATES) {
+     tokens[`name_${state}`] = null;
+@@ -795,6 +841,7 @@ const OWNED_TOKENS = [
+   'sort_key',
+   'ws_key',
+   'tab_key',
++  'title_delegating',
+   SPLIT_TOKEN,
+   ...LOGO_TOKENS,
+   ...STATES.map((s) => `name_${s}`),
+diff --git a/lib/subscribe.js b/lib/subscribe.js
+index 2b36de8..f1d942b 100644
+--- a/lib/subscribe.js
++++ b/lib/subscribe.js
+@@ -15,15 +15,11 @@
+ // lets them rot unread (windows). Ordinary requests go through lib/ipc.js on
+ // their own short connections.
+ //
+-// Neither `workspace.metadata_updated` nor `pane.updated` is subscribed: both
+-// are almost entirely the echo of this plugin's own token writes, and that
+-// echo is not merely noise. Herdr's server answers other requests late while
+-// it is flushing events to a subscriber — measured here at ~110ms per write
+-// with `pane.updated` on, against 1-2ms with it off — so listening to our own
+-// writes made every write slow, which an animation shows as a stutter. What
+-// `pane.updated` was kept for, agent status, has had its own event since 0.9.
+-// Title and cwd changes no longer arrive as events; the daemon's own slow
+-// heartbeat picks those up.
++// Neither `pane.updated` nor `workspace.metadata_updated` is subscribed:
++// they echo our own writes, increasing IPC latency (~110ms versus 1–2ms).
++// The existing two-second daemon heartbeat reconciles pane metadata, titles
++// and lease expiry through the scheduler without listening to that echo.
++// Agent status retains its dedicated event and animation cadence is unchanged.
+ 
+ const fs = require('node:fs');
+ const net = require('node:net');
+diff --git a/test/workspace-logo.test.js b/test/workspace-logo.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/workspace-logo.test.js
+@@ -0,0 +1,137 @@
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const os = require('node:os');
++const path = require('node:path');
++
++const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'radar-workspace-logo-'));
++const configDir = path.join(scratch, 'config');
++fs.mkdirSync(configDir);
++fs.writeFileSync(
++  path.join(configDir, 'config.toml'),
++  'variant = "font"\nfollow_appearance = false\ngroup_gap = false\nlogo_scope = "first_per_workspace"\n',
++);
++process.env.HERDR_PLUGIN_CONFIG_DIR = configDir;
++process.env.HERDR_RADAR_STATE = path.join(scratch, 'state');
++test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
++
++const activity = require('../lib/activity');
++const config = require('../lib/config');
++const herdr = require('../lib/herdr');
++const hook = require('../lib/hook');
++const state = require('../lib/state');
++const view = require('../lib/view');
++const { logoFor } = require('../lib/logos');
++const { Frame } = require('../lib/frame');
++
++function entry(workspace, number, name = 'pi') {
++  return {
++    pane: `${workspace}:p${number}`,
++    terminal: `${workspace}:terminal${number}`,
++    workspace,
++    tab: `${workspace}:t${number}`,
++    name,
++    title: `Session ${number}`,
++    status: 'idle',
++  };
++}
++
++// Observe the public metadata writes; never contact a running Herdr server.
++function fixture(t, entries, stamps, mode = 'grouped') {
++  const published = new Map();
++  let writes = 0;
++  t.mock.method(activity, 'load', () => new Map());
++  t.mock.method(activity, 'save', () => {});
++  t.mock.method(state, 'snapshot', async () => entries);
++  t.mock.method(state, 'labels', async () => ({
++    tabs: new Map(),
++    workspaces: new Map(entries.map((item) => [item.workspace, item.workspace])),
++    parents: new Map(),
++    worktrees: new Map(),
++  }));
++  t.mock.method(view, 'mode', () => mode);
++  t.mock.method(hook, 'apply', (kind, value, pane) => (kind === 'activity' ? stamps.get(pane) : value));
++  t.mock.method(herdr, 'reportMetadataAsync', async (pane, _source, tokens) => {
++    writes += 1;
++    published.set(pane, { ...published.get(pane), ...tokens });
++    return true;
++  });
++  t.mock.method(herdr, 'reportMetadata', () => true);
++  const frame = new Frame('test');
++  t.mock.method(frame.workspaceOrder, 'sync', async () => {});
++  t.mock.method(frame, 'displayFor', (item) => item.status);
++  t.mock.method(frame, 'spaceJobs', () => {});
++  t.mock.method(frame, 'groupJobs', async () => {});
++  return { frame, published, writes: () => writes };
++}
++
++function visibleLogo(tokens) {
++  return Object.entries(tokens).find(([key, value]) => /^logo(?:_|$)/.test(key) && value)?.[1] ?? null;
++}
++
++function assertOwners(published, entries, owners) {
++  assert.deepEqual(
++    [...published].filter(([, tokens]) => visibleLogo(tokens)).map(([pane]) => pane).sort(),
++    [...owners].sort(),
++  );
++  for (const item of entries) {
++    const tokens = published.get(item.pane);
++    assert.equal(tokens.harness_logo, logoFor(item.name), 'canonical harness identity must remain on every pane');
++    assert.ok(tokens.title_idle.endsWith(item.title), 'hiding a logo must not hide or replace its title');
++    assert.ok(tokens.state_idle, 'lifecycle state must remain available');
++    if (owners.includes(item.pane)) assert.equal(visibleLogo(tokens).replace(/^[\u200b\s]+/u, ''), logoFor(item.name));
++    else assert.equal(visibleLogo(tokens), null);
++  }
++}
++
++test('ten Pi sessions show one logo at the first displayed entry in each project', async (t) => {
++  const entries = [
++    ...Array.from({ length: 10 }, (_, i) => entry('project-a', i + 1)),
++    ...Array.from({ length: 3 }, (_, i) => entry('project-b', i + 1)),
++  ];
++  const stamps = new Map(entries.map((item, i) => [item.pane, (i + 1) * 60000]));
++  const { frame, published } = fixture(t, entries, stamps);
++  await frame.render(1000000);
++  assertOwners(published, entries, ['project-a:p10', 'project-b:p3']);
++});
++
++test('different harnesses each retain their first logo within the same project', async (t) => {
++  const entries = [entry('project-a', 1), entry('project-a', 2), entry('project-a', 3, 'claude'), entry('project-a', 4, 'claude')];
++  const stamps = new Map(entries.map((item, i) => [item.pane, (i + 1) * 60000]));
++  const { frame, published } = fixture(t, entries, stamps);
++  await frame.render(1000000);
++  assertOwners(published, entries, ['project-a:p2', 'project-a:p4']);
++});
++
++test('a reordered group transfers its logo and clears the cached old owner', async (t) => {
++  const entries = [entry('project-a', 1), entry('project-a', 2)];
++  const stamps = new Map([['project-a:p1', 120000], ['project-a:p2', 60000]]);
++  const { frame, published, writes } = fixture(t, entries, stamps);
++  await frame.render(1000000);
++  assertOwners(published, entries, ['project-a:p1']);
++  stamps.set('project-a:p2', 180000);
++  await frame.render(1000150);
++  assertOwners(published, entries, ['project-a:p2']);
++  const acceptedWrites = writes();
++  await frame.render(1000300);
++  assert.equal(writes(), acceptedWrites, 'unchanged idle rows must not gain redundant metadata writes');
++});
++
++test('all scope retains the existing logo on every session', async (t) => {
++  const previous = config.logoScope;
++  config.logoScope = 'all';
++  t.after(() => { config.logoScope = previous; });
++  const entries = [entry('project-a', 1), entry('project-a', 2)];
++  const { frame, published } = fixture(t, entries, new Map());
++  await frame.render(1000000);
++  assertOwners(published, entries, entries.map((item) => item.pane));
++});
++
++test('flat recent view retains the existing per-session logos', async (t) => {
++  const entries = [entry('project-a', 1), entry('project-a', 2)];
++  const { frame, published } = fixture(t, entries, new Map(), 'recent');
++  await frame.render(1000000);
++  assertOwners(published, entries, entries.map((item) => item.pane));
++});
+diff --git a/test/delegated-activity.test.js b/test/delegated-activity.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/delegated-activity.test.js
+@@ -0,0 +1,284 @@
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const { createHash } = require('node:crypto');
++const net = require('node:net');
++const { EventEmitter } = require('node:events');
++
++// Short, owned state root; no real CLI, sockets, session records or configs.
++const root = fs.mkdtempSync(`${require('node:os').tmpdir()}/rd-`);
++process.env.HERDR_BIN_PATH = `${root}/nonexistent`;
++process.env.XDG_CONFIG_HOME = root;
++process.env.XDG_STATE_HOME = root;
++process.env.HERDR_PLUGIN_STATE_DIR = `${root}/state`;
++process.env.HERDR_PLUGIN_CONFIG_DIR = `${root}/config`;
++process.env.HERDR_RADAR_STATE = `${root}/state`;
++process.env.HERDR_SOCKET_PATH = `${root}/mock.sock`;
++test.after(() => fs.rmSync(root, { recursive: true, force: true }));
++
++const herdr = require('../lib/herdr');
++const activity = require('../lib/activity');
++const config = require('../lib/config');
++const view = require('../lib/view');
++const state = require('../lib/state');
++const { Frame } = require('../lib/frame');
++const subscribe = require('../lib/subscribe');
++const { logoFor } = require('../lib/logos');
++
++const session = '/mock/parent.jsonl';
++const sessionKey = value => createHash('sha256').update(value, 'utf8').digest('hex');
++// Rust's chars().take(80) bounds each metadata value, not agent_session.value.
++const nativeTokens = tokens => Object.fromEntries(Object.entries(tokens)
++  .map(([key, value]) => [key, typeof value === 'string' ? [...value].slice(0, 80).join('') : value]));
++function agent(overrides = {}) {
++  return {
++    pane_id: 'w1:p1', tab_id: 'w1:t1', workspace_id: 'w1', agent: 'pi',
++    agent_status: 'idle', agent_session: { kind: 'path', value: session },
++    terminal_title_stripped: 'Project · Parent',
++    tokens: { subagents_running: '2', subagents_session_key: sessionKey(session) },
++    ...overrides,
++  };
++}
++function fixture(t, initial = [agent()], { grouped = true, mode = null, stamps = new Map() } = {}) {
++  let agents = initial;
++  const writes = [];
++  const spaces = [];
++  t.mock.method(herdr, 'agentsAsync', async () => agents);
++  t.mock.method(herdr, 'panesAsync', async () => agents);
++  t.mock.method(herdr, 'tabsAsync', async () => agents.map(a => ({ tab_id: a.tab_id, label: '1' })));
++  t.mock.method(herdr, 'workspacesAsync', async () => [
++    { workspace_id: 'w1', label: 'Project' }, { workspace_id: 'w2', label: 'Other' },
++  ]);
++  t.mock.method(herdr, 'panelGrouped', () => grouped);
++  t.mock.method(herdr, 'reportMetadata', () => { throw new Error('unexpected synchronous write'); });
++  t.mock.method(herdr, 'reportMetadataAsync', async (pane, source, tokens) => {
++    assert.ok(Object.keys(tokens).length <= 16);
++    writes.push({ pane, source, tokens });
++    return true;
++  });
++  t.mock.method(herdr, 'reportWorkspaceMetadataAsync', async (workspace, source, tokens) => {
++    spaces.push({ workspace, source, tokens });
++    return true;
++  });
++  t.mock.method(activity, 'load', () => new Map(stamps));
++  t.mock.method(activity, 'save', () => {});
++  t.mock.method(activity, 'recover', () => null);
++  t.mock.method(view, 'mode', () => mode);
++  const frame = new Frame('test:radar');
++  return {
++    frame, writes, spaces,
++    set: next => { agents = next; },
++    render: (now = Date.now()) => frame.render(now),
++    written: (pane = 'w1:p1') => Object.assign({}, ...writes.filter(w => w.pane === pane).map(w => w.tokens)),
++  };
++}
++
++test('matching positive decimal count colors only the delegated title, not lifecycle or logo', async t => {
++  const f = fixture(t);
++  await f.render();
++  const tokens = f.written();
++  assert.equal(tokens.title_delegating, 'Parent');
++  assert.equal(tokens.title_idle, null);
++  assert.ok(tokens.state_idle);
++  assert.equal(tokens.logo, logoFor('pi'));
++  assert.equal(tokens.harness_logo, logoFor('pi'));
++  assert.equal(tokens.group, 'Project');
++  assert.ok(f.spaces.some(w => w.tokens.space_idle));
++  assert.ok(f.writes.every(w => w.source === 'test:radar'));
++  assert.ok(f.writes.every(w => !('subagents_running' in w.tokens) && !('agent_status' in w.tokens)));
++});
++
++test('snapshot accepts only Pi, strict positive decimal safe integers and exact session key ownership', async t => {
++  const invalid = [undefined, null, '', '0', '-1', '+1', ' 1', '1 ', '1.0', '1e2', 'NaN', 'Infinity', '9007199254740992', 2];
++  const agents = [agent({ pane_id: 'valid', tokens: { subagents_running: '9007199254740991', subagents_session_key: sessionKey(session) } })];
++  for (const count of invalid) agents.push(agent({ pane_id: `count:${String(count)}`, tokens: { subagents_running: count, subagents_session_key: sessionKey(session) } }));
++  agents.push(agent({ pane_id: 'foreign', tokens: { subagents_running: '2', subagents_session_key: sessionKey('/mock/other.jsonl') } }));
++  const malformedKeys = [undefined, null, '', 'a'.repeat(63), 'a'.repeat(65), 'g'.repeat(64), sessionKey(session).toUpperCase(), ` ${sessionKey(session)}`, `${sessionKey(session)}\n`, 64];
++  for (const key of malformedKeys) agents.push(agent({ pane_id: `key:${String(key)}`, tokens: { subagents_running: '2', subagents_session_key: key } }));
++  for (const value of ['', null, undefined, 42]) agents.push(agent({ pane_id: `session:${String(value)}`, agent_session: { kind: 'path', value } }));
++  agents.push(agent({ pane_id: 'legacy', tokens: { subagents_running: '2', subagents_session_path: session } }));
++  agents.push(agent({ pane_id: 'missing', tokens: { subagents_running: '2' } }));
++  agents.push(agent({ pane_id: 'id', agent_session: { kind: 'id', value: session } }));
++  agents.push(agent({ pane_id: 'no-session', agent_session: null }));
++  agents.push(agent({ pane_id: 'other-harness', agent: 'codex' }));
++  const f = fixture(t, agents);
++  const snapshot = await state.snapshot();
++  assert.equal(snapshot[0].subagentsRunning, Number.MAX_SAFE_INTEGER);
++  assert.ok(snapshot.slice(1).every(a => a.subagentsRunning === 0));
++  await f.render();
++  for (const a of agents.slice(1)) {
++    const tokens = f.written(a.pane_id);
++    assert.equal(tokens.title_delegating, null, a.pane_id);
++    assert.ok(tokens.title_idle, a.pane_id);
++  }
++});
++
++test('native-sanitized long UTF8 SDK session key renders blue without prefix ownership', async t => {
++  const fullPath = '/home/mock/.pi/agent/sessions/--home-mock-src-project-with-a-long-worktree-name--/2026-06-17T12-34-56-789Z_12345678-1234-1234-1234-123456789abc-é.jsonl';
++  const otherPath = fullPath.replace('123456789abc-é.jsonl', 'abcdefabcdef-é.jsonl');
++  assert.ok([...fullPath].length > 80);
++  assert.notEqual(fullPath, otherPath);
++  assert.equal(fullPath.slice(0, 80), otherPath.slice(0, 80));
++  const tokens = nativeTokens({ subagents_running: '2', subagents_session_key: sessionKey(fullPath) });
++  assert.equal(tokens.subagents_session_key.length, 64);
++  const f = fixture(t, [agent({ agent_session: { kind: 'path', value: fullPath }, tokens })]);
++  assert.equal((await state.snapshot())[0].subagentsRunning, 2);
++  await f.render();
++  assert.equal(f.written().title_delegating, 'Parent');
++  f.set([agent({ agent_session: { kind: 'path', value: otherPath }, tokens })]);
++  assert.equal((await state.snapshot())[0].subagentsRunning, 0);
++  await f.render();
++  assert.equal(f.written().title_delegating, null);
++  assert.equal(f.written().title_idle, 'Parent');
++  const legacy = nativeTokens({ subagents_running: '2', subagents_session_path: fullPath });
++  assert.equal(legacy.subagents_session_path.length, 80);
++  f.set([agent({ agent_session: { kind: 'path', value: fullPath }, tokens: legacy })]);
++  assert.equal((await state.snapshot())[0].subagentsRunning, 0);
++  await f.render();
++  assert.equal(f.written().title_delegating, null);
++  assert.equal(f.written().title_idle, 'Parent');
++});
++
++for (const status of ['working', 'blocked']) {
++  test(`${status} takes precedence and clears a previously delegated title`, async t => {
++    const f = fixture(t);
++    await f.render();
++    f.set([agent({ agent_status: status })]);
++    await f.render();
++    assert.equal(f.written().title_delegating, null);
++    assert.ok(f.written()[`title_${status}`]);
++    assert.ok(f.written()[`state_${status}`]);
++  });
++}
++
++for (const clearing of ['zero', 'lease expired', 'session switched']) {
++  test(`${clearing} clears blue without a parent status or title change`, async t => {
++    const f = fixture(t);
++    await f.render();
++    assert.equal(f.written().title_delegating, 'Parent');
++    const next = clearing === 'zero'
++      ? agent({ tokens: { subagents_running: '0', subagents_session_key: sessionKey(session) } })
++      : clearing === 'lease expired' ? agent({ tokens: {} })
++        : agent({ agent_session: { kind: 'path', value: '/mock/new.jsonl' } });
++    f.set([next]);
++    await f.render();
++    assert.equal(f.written().title_delegating, null);
++    assert.equal(f.written().title_idle, 'Parent');
++  });
++}
++
++for (const [tier, age] of [['idle_fresh', 10000], ['idle', 3600000], ['idle_stale', 10800000]]) {
++  test(`${tier} keeps its canonical marker while children run`, async t => {
++    const now = Date.now();
++    const f = fixture(t, [agent()], { stamps: new Map([['w1:p1', now - age]]) });
++    await f.render(now);
++    assert.ok(f.written()[`state_${tier}`]);
++    assert.equal(f.written()[`title_${tier}`], null);
++    assert.equal(f.written().title_delegating, 'Parent');
++  });
++}
++
++test('held finished stays canonical and green returns when children stop', async t => {
++  const f = fixture(t, [agent({ tokens: { ...agent().tokens, state_done: 'done' } })]);
++  await f.render();
++  assert.ok(f.written().state_done);
++  assert.match(f.written().title_delegating, /Parent$/);
++  assert.equal(f.written().title_done, null);
++  f.set([agent({ tokens: { state_done: 'done' } })]);
++  await f.render();
++  assert.equal(f.written().title_delegating, null);
++  assert.match(f.written().title_done, /Parent$/);
++});
++
++for (const [scope, grouped] of [['all', true], ['first_per_workspace', true], ['first_per_workspace', false]]) {
++  test(`delegated rendering preserves ${scope}, grouped=${grouped} logos and groups`, async t => {
++    t.mock.property(config, 'logoScope', scope);
++    const agents = [agent(), agent({ pane_id: 'w1:p2', tab_id: 'w1:t2' }),
++      agent({ pane_id: 'w1:p3', tab_id: 'w1:t3', agent: 'codex' }),
++      agent({ pane_id: 'w2:p1', tab_id: 'w2:t1', workspace_id: 'w2' })];
++    const f = fixture(t, agents, { grouped });
++    await f.render();
++    assert.ok(f.written().logo);
++    assert.equal(Boolean(f.written('w1:p2').logo), scope === 'all' || !grouped);
++    assert.ok(f.written('w1:p3').logo);
++    assert.ok(f.written('w2:p1').logo);
++    const before = f.written('w1:p2');
++    f.set(agents.map(a => ({ ...a, tokens: {} })));
++    await f.render();
++    const after = f.written('w1:p2');
++    for (const key of ['logo', 'harness_logo', 'sort_key', 'ws_key', 'tab_key', 'group', 'gap', 'split_mark']) {
++      assert.equal(after[key], before[key], key);
++    }
++    assert.equal(after.title_delegating, null);
++    assert.equal(Boolean(f.written().group), grouped);
++  });
++}
++
++test('subscription excludes self-write events but retains status wakes', t => {
++  const stream = new EventEmitter();
++  const sent = [];
++  stream.write = bytes => sent.push(JSON.parse(bytes));
++  stream.destroy = () => {};
++  t.mock.method(net, 'connect', options => {
++    assert.equal(options.path, process.env.HERDR_SOCKET_PATH);
++    return stream;
++  });
++  let wakes = 0;
++  const listener = subscribe.start({ onWake: () => wakes++, onGone: () => assert.fail('unexpected disconnect') });
++  try {
++    stream.emit('connect');
++    const kinds = sent[0].params.subscriptions.map(s => s.type);
++    assert.ok(!kinds.includes('pane.updated'), 'pane writes must not echo into the scheduler');
++    assert.ok(!kinds.includes('workspace.metadata_updated'));
++    assert.ok(kinds.includes('pane.agent_status_changed'));
++    stream.emit('data', '{"id":"daemon-sub","result":{"type":"subscription_started"}}\n');
++    stream.emit('data', '{"event":{"kind":"pane_agent_status_changed"}}\n');
++    assert.equal(wakes, 2);
++    assert.equal(sent.length, 1, 'stream must stay write-silent');
++  } finally {
++    listener.stop();
++  }
++});
++
++test('unknown parent clears delegated title without changing its canonical marker', async t => {
++  const f = fixture(t);
++  await f.render();
++  assert.equal(f.written().title_delegating, 'Parent');
++  f.set([agent({ agent_status: 'unknown' })]);
++  await f.render();
++  assert.equal(f.written().title_delegating, null);
++  assert.ok(f.written().title_unknown);
++  assert.ok(f.written().state_unknown);
++});
++
++test('existing daemon heartbeat reconciles metadata within five seconds without a new loop', async t => {
++  // Verify the real entrypoint/timer wiring without starting the live daemon.
++  const entrypoint = fs.readFileSync(require.resolve('../bin/agent-state.js'), 'utf8');
++  assert.match(entrypoint, /daemon\.start\(\)/);
++  const daemon = fs.readFileSync(require.resolve('../lib/daemon.js'), 'utf8');
++  const heartbeat = Number(/const HEARTBEAT_MS = (\d+);/.exec(daemon)?.[1]);
++  assert.ok(heartbeat > 0 && heartbeat <= 5000);
++  assert.match(daemon, /setInterval\(wake, HEARTBEAT_MS\)/);
++  assert.match(daemon, /const wake = scheduler\.wake/);
++  const now = Date.now();
++  const f = fixture(t, [agent({ tokens: {} })]);
++  await f.render(now);
++  assert.equal(f.written().title_delegating, null);
++  f.set([agent()]);
++  await f.render(now + heartbeat);
++  assert.equal(f.written().title_delegating, 'Parent');
++  f.set([agent({ tokens: {} })]);
++  await f.render(now + 2 * heartbeat);
++  assert.equal(f.written().title_delegating, null);
++  assert.equal(f.written().title_idle, 'Parent');
++});
++
++test('orphan cleanup clears the delegated title', async t => {
++  const f = fixture(t);
++  await f.render();
++  f.set([]);
++  await f.render();
++  assert.equal(f.written().title_delegating, null);
++});
+diff --git a/test/delegated-roles.test.js b/test/delegated-roles.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/delegated-roles.test.js
+@@ -0,0 +1,227 @@
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { createHash } = require('node:crypto');
++const herdr = require('../lib/herdr');
++const activity = require('../lib/activity');
++const config = require('../lib/config');
++const view = require('../lib/view');
++const state = require('../lib/state');
++const { Frame } = require('../lib/frame');
++const { logoFor, stateGlyph } = require('../lib/logos');
++
++const session = '/mock/parent.jsonl';
++const owner = value => createHash('sha256').update(value, 'utf8').digest('hex');
++const title = 'π - Inspect  project · π - unchanged';
++const plainTitle = 'Inspect  project · π - unchanged';
++function agent(roles = 'A', overrides = {}) {
++  return {
++    pane_id: 'w1:p1', tab_id: 'w1:t1', workspace_id: 'w1', agent: 'pi',
++    agent_status: 'idle', agent_session: { kind: 'path', value: session },
++    terminal_title_stripped: title,
++    tokens: { subagents_running: '2', subagents_session_key: owner(session), subagents_roles: roles },
++    ...overrides,
++  };
++}
++
++// All transport, persistence and transcript recovery are mocked. The command
++// supplies isolated paths before modules load; this fixture never calls a CLI.
++function fixture(t, initial = [agent()]) {
++  let agents = initial;
++  const writes = [];
++  const spaces = [];
++  t.mock.method(herdr, 'agentsAsync', async () => agents);
++  t.mock.method(herdr, 'panesAsync', async () => agents);
++  t.mock.method(herdr, 'tabsAsync', async () => agents.map(a => ({ tab_id: a.tab_id, label: '1' })));
++  t.mock.method(herdr, 'workspacesAsync', async () => [{ workspace_id: 'w1', label: 'Project' }]);
++  t.mock.method(herdr, 'panelGrouped', () => true);
++  t.mock.method(herdr, 'reportMetadata', () => assert.fail('unexpected synchronous transport'));
++  t.mock.method(herdr, 'reportMetadataAsync', async (pane, source, tokens) => {
++    assert.ok(Object.keys(tokens).length <= 16);
++    writes.push({ pane, source, tokens });
++    return true;
++  });
++  t.mock.method(herdr, 'reportWorkspaceMetadataAsync', async (workspace, source, tokens) => {
++    spaces.push({ workspace, source, tokens });
++    return true;
++  });
++  t.mock.method(activity, 'load', () => new Map());
++  t.mock.method(activity, 'save', () => {});
++  t.mock.method(activity, 'recover', () => null);
++  t.mock.method(view, 'mode', () => null);
++  t.mock.property(config, 'rowLabel', 'title');
++  t.mock.property(config, 'logoScope', 'first_per_workspace');
++  let frame = new Frame('test:roles');
++  return {
++    writes, spaces,
++    set: next => { agents = next; },
++    reset: next => { agents = next; frame = new Frame('test:roles'); },
++    render: () => frame.render(Date.now()),
++    written: (pane = 'w1:p1') => Object.assign({}, ...writes.filter(w => w.pane === pane).map(w => w.tokens)),
++  };
++}
++
++for (const [input, expected] of [
++  ['A', 'A'], ['R', 'R'], ['W', 'W'], ['V', 'V'], ['RD', 'RD'],
++  ['W+A', 'A+W'], ['W+A+W', 'A+W'], ['RD+V+W+R+A', 'A+R+W+V+RD'],
++]) {
++  test(`validated ${input} renders ${expected} only in the delegated title`, async t => {
++    const a = agent(input);
++    const f = fixture(t, [a]);
++    const [entry] = await state.snapshot();
++    assert.equal(entry.subagentsRoles, expected);
++    assert.equal(entry.title, title, 'canonical snapshot title is not renamed');
++    await f.render();
++    assert.equal(f.written().title_delegating, `${expected} Inspect  project · π - unchanged`);
++    assert.equal(f.written().logo, logoFor('pi'));
++    assert.equal(f.written().harness_logo, logoFor('pi'));
++    assert.ok(f.written().state_idle);
++    assert.ok(f.spaces.some(w => w.tokens.space_idle));
++    assert.ok(f.writes.every(w => w.source === 'test:roles'));
++    assert.ok(f.writes.every(w => !('subagents_roles' in w.tokens) && !('agent_status' in w.tokens)));
++    assert.equal(a.terminal_title_stripped, title);
++  });
++}
++
++test('missing, empty, unknown and malformed roles show plain Pi title words', async t => {
++  const invalid = [undefined, null, '', 'X', 'A+X', 'a', 'explore', ' A', 'A ',
++    'A\n', 'A++W', '+A', 'A+', 'A,W', 'A/W', 'Ａ', 1, ['A'], {},
++    'A+R+W+V+RD+A', 'A'.repeat(81)];
++  const agents = invalid.map((roles, i) => agent(roles, { pane_id: `p${i}`,
++    tokens: { subagents_running: '2', subagents_session_key: owner(session), subagents_roles: roles } }));
++  const f = fixture(t, agents);
++  assert.ok((await state.snapshot()).every(e => e.subagentsRunning === 2 && e.subagentsRoles === ''));
++  await f.render();
++  for (const a of agents) {
++    const shown = f.written(a.pane_id).title_delegating;
++    assert.ok(shown.endsWith(plainTitle) && !shown.includes('π - Inspect'), String(a.tokens.subagents_roles));
++  }
++});
++
++test('roles require the existing exact owner and positive safe-count boundary', async t => {
++  const invalid = [
++    { tokens: { subagents_running: '0', subagents_session_key: owner(session), subagents_roles: 'A' } },
++    { tokens: { subagents_running: '9007199254740992', subagents_session_key: owner(session), subagents_roles: 'A' } },
++    { tokens: { subagents_running: 2, subagents_session_key: owner(session), subagents_roles: 'A' } },
++    { tokens: { subagents_running: '2', subagents_session_key: owner('/mock/foreign'), subagents_roles: 'A' } },
++    { tokens: { subagents_running: '2', subagents_session_key: owner(session).toUpperCase(), subagents_roles: 'A' } },
++    { tokens: { subagents_running: '2', subagents_roles: 'A' } },
++    { agent_session: { kind: 'id', value: session } },
++    { agent: 'codex' },
++  ];
++  const agents = invalid.map((overrides, i) => agent('A', { ...overrides, pane_id: `p${i}` }));
++  const f = fixture(t, agents);
++  assert.ok((await state.snapshot()).every(e => e.subagentsRunning === 0 && e.subagentsRoles === ''));
++  await f.render();
++  for (const a of agents) {
++    assert.equal(f.written(a.pane_id).title_delegating, null);
++    const shown = f.written(a.pane_id).title_idle;
++    assert.ok(shown.endsWith(a.agent === 'pi' ? plainTitle : title));
++    assert.equal(shown.includes('π - Inspect'), a.agent !== 'pi');
++  }
++});
++
++test('same-count A to W redraws, missing roles shows plain title, and completion clears blue', async t => {
++  const f = fixture(t);
++  await f.render();
++  const before = f.written();
++  const at = f.writes.length;
++  f.set([agent('W')]);
++  await f.render();
++  assert.equal(f.written().title_delegating, 'W Inspect  project · π - unchanged');
++  assert.ok(f.writes.slice(at).some(w => w.tokens.title_delegating === f.written().title_delegating));
++  f.set([agent('')]);
++  await f.render();
++  assert.equal(f.written().title_delegating, plainTitle);
++  f.set([agent('W', { tokens: { ...agent('W').tokens, subagents_running: '0' } })]);
++  await f.render();
++  assert.equal(f.written().title_delegating, null);
++  assert.equal(f.written().title_idle, plainTitle);
++  for (const key of ['logo', 'harness_logo', 'state_idle', 'sort_key', 'ws_key', 'tab_key', 'group', 'gap', 'split_mark']) {
++    assert.equal(f.written()[key], before[key], key);
++  }
++});
++
++for (const status of ['working', 'blocked', 'unknown']) {
++  test(`${status} retains title words and state without role or textual Pi marker`, async t => {
++    const f = fixture(t);
++    await f.render();
++    f.set([agent('RD', { agent_status: status })]);
++    await f.render();
++    assert.equal(f.written().title_delegating, null);
++    const shown = f.written()[`title_${status}`];
++    assert.ok(shown.endsWith(plainTitle) && !shown.includes('π - Inspect'));
++    assert.ok(f.written()[`state_${status}`]);
++  });
++}
++
++test('every Pi row removes its textual marker, including the first logo owner and working spinner', async t => {
++  const original = agent('', { tokens: {} });
++  const second = { ...original, pane_id: 'w1:p2', tab_id: 'w1:t2' };
++  const f = fixture(t, [original, second]);
++  for (const status of ['idle', 'working', 'blocked', 'done', 'unknown']) {
++    // Register mocks once. Only recreate the public Frame to isolate cases
++    // from working/blocked holds; do not stack mocks on the same properties.
++    f.reset([{ ...original, agent_status: status }, { ...second, agent_status: status }]);
++    await f.render();
++    for (const pane of ['w1:p1', 'w1:p2']) {
++      const tokens = f.written(pane);
++      const displayed = Object.entries(tokens).filter(([key, value]) => key.startsWith('title_') && value);
++      assert.equal(displayed.length, 1, `${status} ${pane}`);
++      assert.ok(displayed[0][1].endsWith(plainTitle), `${status} ${pane}`);
++      assert.ok(!displayed[0][1].includes('π - Inspect'), 'leading marker is absent');
++      assert.ok(tokens[`state_${status}`], 'lifecycle mark is preserved');
++      assert.equal(tokens.harness_logo, logoFor('pi'));
++      assert.equal(original.terminal_title_stripped, title, 'native title is unchanged');
++      if (status === 'working') assert.ok(config.FRAMES.some(frame => displayed[0][1].includes(frame)), 'spinner is preserved');
++      if (status === 'done') assert.ok(displayed[0][1].includes(stateGlyph('done')), 'visible finished check is preserved');
++      if (status === 'blocked') assert.ok([stateGlyph('blocked'), stateGlyph('idle')].some(mark => displayed[0][1].includes(mark)), 'visible blocked pulse is preserved');
++    }
++    const first = f.written();
++    assert.ok(['logo', 'logo_working', 'logo_stale'].some(key => first[key]?.endsWith(logoFor('pi'))));
++    for (const key of ['logo', 'logo_working', 'logo_stale']) assert.equal(f.written('w1:p2')[key], null);
++  }
++});
++
++test('a different harness keeps a Pi-like title and its own logo', async t => {
++  const a = agent('A', { agent: 'codex', tokens: {} });
++  const f = fixture(t, [a]);
++  await f.render();
++  assert.equal(f.written().title_idle, title);
++  assert.equal(f.written().logo, logoFor('codex'));
++  assert.equal(f.written().title_delegating, null);
++});
++
++test('only the exact leading Pi marker changes, not arbitrary title text', async t => {
++  const titles = ['Inspect π - project', 'π — Inspect', 'π- Inspect', 'Parent'];
++  const f = fixture(t, titles.map((text, i) => agent('A', { pane_id: `p${i}`, terminal_title_stripped: text })));
++  await f.render();
++  for (const [i, text] of titles.entries()) assert.ok(f.written(`p${i}`).title_delegating.endsWith(text));
++});
++
++test('native80 metadata keeps full-path ownership and original first-harness logo rules', async t => {
++  const fullPath = '/mock/' + 'long-session-'.repeat(9) + 'é-parent.jsonl';
++  const otherPath = fullPath.replace('parent', 'foreign');
++  assert.ok([...fullPath].length > 80);
++  assert.equal(fullPath.slice(0, 80), otherPath.slice(0, 80));
++  const native = tokens => Object.fromEntries(Object.entries(tokens).map(([k, v]) => [k, [...v].slice(0, 80).join('')]));
++  const tokens = native({ subagents_running: '2', subagents_session_key: owner(fullPath), subagents_roles: 'A+R+W+V+RD' });
++  assert.equal(tokens.subagents_session_key.length, 64);
++  assert.equal(tokens.subagents_roles.length, 10);
++  const first = agent('A', { agent_session: { kind: 'path', value: fullPath }, tokens });
++  const second = { ...first, pane_id: 'w1:p2', tab_id: 'w1:t2' };
++  const f = fixture(t, [first, second]);
++  assert.ok((await state.snapshot()).every(e => e.subagentsRoles === 'A+R+W+V+RD'));
++  await f.render();
++  assert.equal(f.written().logo, logoFor('pi'));
++  assert.equal(f.written('w1:p2').logo, null);
++  assert.equal(f.written('w1:p2').harness_logo, logoFor('pi'));
++  assert.ok(f.written('w1:p2').title_delegating.endsWith('A+R+W+V+RD Inspect  project · π - unchanged'));
++  f.set([{ ...first, agent_session: { kind: 'path', value: otherPath } }]);
++  assert.equal((await state.snapshot())[0].subagentsRoles, '');
++  await f.render();
++  assert.equal(f.written().title_delegating, null);
++  assert.equal(f.written().title_idle, plainTitle);
++  assert.equal(f.written('w1:p2').title_delegating, null, 'closed pane clears role title');
++});

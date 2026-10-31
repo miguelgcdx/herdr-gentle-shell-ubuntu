@@ -1,0 +1,5 @@
+# Keep Herdr's existing theme; enable Radar's installed icon font.
+follow_appearance = false
+variant = "font"
+group_gap = false
+logo_scope = "first_per_workspace"

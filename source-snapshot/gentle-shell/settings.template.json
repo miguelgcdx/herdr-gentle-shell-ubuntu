@@ -1,0 +1,18 @@
+{
+  "extensions": [
+    "+builtin:codemode",
+    "~/.pi/agent/extensions/herdr-session-display.ts",
+    "~/.pi/agent/extensions/herdr-pi-notifications.ts",
+    "~/.pi/agent/extensions/herdr-subagent-activity/index.ts"
+  ],
+  "packages": [
+    "npm:pi-web-access",
+    "npm:pi-btw",
+    "npm:gentle-engram@0.2.0"
+  ],
+  "theme": "blue-theme-border-trial",
+  "themes": [
+    "~/.pi/agent/themes/blue-theme-border-trial.json"
+  ],
+  "tuiMode": "fullscreen"
+}

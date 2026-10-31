@@ -1,0 +1,38 @@
+{
+  "README.md": {
+    "live_sha256": "5e726698abbad80982a3377385008e11bac8e8ab96036a6536acd797a4cfcac1",
+    "reconstructed_sha256": "5e726698abbad80982a3377385008e11bac8e8ab96036a6536acd797a4cfcac1"
+  },
+  "bin/settings.js": {
+    "live_sha256": "62ff048b615775fba9f4ade83f50ef8316b38e687bbd6574f93495e9623f9afe",
+    "reconstructed_sha256": "62ff048b615775fba9f4ade83f50ef8316b38e687bbd6574f93495e9623f9afe"
+  },
+  "lib/config.js": {
+    "live_sha256": "b0206476c3b6e1e85dbe142b0f254701faf44964b1dd3a6367bf5fe3aa3befbf",
+    "reconstructed_sha256": "b0206476c3b6e1e85dbe142b0f254701faf44964b1dd3a6367bf5fe3aa3befbf"
+  },
+  "lib/frame.js": {
+    "live_sha256": "de58f62ee8eb1704287aa17eaab53900d2c6c3d951bfbc25d4e71a299d5b04f9",
+    "reconstructed_sha256": "de58f62ee8eb1704287aa17eaab53900d2c6c3d951bfbc25d4e71a299d5b04f9"
+  },
+  "lib/state.js": {
+    "live_sha256": "70a0b83003ea43d159c4c022034c1669af0ceb74732a870c774e072872f6df99",
+    "reconstructed_sha256": "70a0b83003ea43d159c4c022034c1669af0ceb74732a870c774e072872f6df99"
+  },
+  "lib/subscribe.js": {
+    "live_sha256": "6b94302b8c1bc71e48df954d99d4f285cfbfb867858d07b9304a11fab3ca411e",
+    "reconstructed_sha256": "6b94302b8c1bc71e48df954d99d4f285cfbfb867858d07b9304a11fab3ca411e"
+  },
+  "test/workspace-logo.test.js": {
+    "live_sha256": "600ca0db47d52d22daee466f4f5a4d7290263dad867eb2513a30c358e74f5281",
+    "reconstructed_sha256": "600ca0db47d52d22daee466f4f5a4d7290263dad867eb2513a30c358e74f5281"
+  },
+  "test/delegated-activity.test.js": {
+    "live_sha256": "14d48090a0c068fb5dfe689a31ec12d738098aeafe3e80b8e8b6940d3b84fe96",
+    "reconstructed_sha256": "669d2200defe7078a1e4e3113ca8c9a72177197a89d635596ecf976387a7cac2"
+  },
+  "test/delegated-roles.test.js": {
+    "live_sha256": "ab6ea35a8124d4d63de4cb9ccee1ca7a5838ab9586d589f040e7283728c0d366",
+    "reconstructed_sha256": "ab6ea35a8124d4d63de4cb9ccee1ca7a5838ab9586d589f040e7283728c0d366"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "package.json": "20cdfc51b5c0c76c61ca7bef8f0e0ac10137196f9e60d3c443a0ed9792f2694a",
+  "lib/managed-config.js": "9e9978e41bbb8a8551d940c8ef5e713bc7d0d7174a41ec73d5d6c906fdefc8aa",
+  "lib/paths.js": "9c6f913e71f791acc003aac600d6cc974ddd0c71a01b02c96fd7989af78f31b0",
+  "lib/toml-blocks.js": "c7efd75e098a4f6cf9cafb5f5b3d5a89b920dfe5252cda5a824153f8531b285a",
+  "lib/herdr.js": "ef90febd3f898014142073179969c11ebedcec8dfa56ba6d2b20a45b879a8060",
+  "lib/ipc.js": "723766a95ab6350d735010ae4e4c5e548e7ae2557adcf742d1297d594f8b4fde",
+  "lib/palette.js": "d5df8837d3d2c7f2101c0711cf4997b3ab560e914febb332531ac95517359d0f",
+  "lib/logos.js": "ccb168eaad7db77906a2da0a41200306c0ac39e05bbd3e648b22199b435443b3",
+  "lib/appearance.js": "dd72cf176aba707df328f9f5d843834a9b9b16bfd68e0965db73d2cace8cf478",
+  "lib/config.js": "b0206476c3b6e1e85dbe142b0f254701faf44964b1dd3a6367bf5fe3aa3befbf",
+  "lib/identity.js": "eed38e5723edec88d3d8afed3b0cbed6bcc4575fd800da089b4756904e23d572",
+  "lib/font.js": "169365642d187c314eed8dfe03937acd6888c62f3a1a4f601e88bef393103053"
+}

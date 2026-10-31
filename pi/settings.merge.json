@@ -1,0 +1,9 @@
+{
+  "theme": "blue-theme-border-trial",
+  "themes": [
+    "~/.pi/agent/themes/blue-theme-border-trial.json"
+  ],
+  "extensions": [
+    "~/.pi/agent/extensions/herdr-session-display.ts"
+  ]
+}
